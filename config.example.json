@@ -1,0 +1,11 @@
+{
+  "telegram_bot_token": "ISI_TOKEN_DARI_BOTFATHER",
+  "allowed_chat_ids": ["ISI_CHAT_ID_KAMU"],
+  "report_interval_hours": 2,
+  "challenge_timeout_sec": 300,
+  "api_base": "api.rpow2.com",
+  "sessions": [
+    "rpow_session=COOKIE_AKUN_1",
+    "rpow_session=COOKIE_AKUN_2"
+  ]
+}
