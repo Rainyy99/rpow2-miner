@@ -95,5 +95,3 @@ bash get_cookie.sh URL 1
 | ▶️ Resume | Lanjutkan mining |
 | 🔑 Update Cookie | Update cookie via Telegram |
 | ➕ Tambah Akun | Daftarkan akun baru |
-
-## Struktur File
