@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+"""
+RPOW2 Mining Bot - Android/Termux Edition
+Samsung Galaxy A15 Optimized
+
+Changelog:
+- v1.0: Basic mining bot
+- v2.0: Telegram bot control + cookie helper
+- v3.0: Native C miner integration (20x hashrate boost)
+        Multi-thread configurable (1/2/4/6/8)
+        Auto-fallback ke Python kalau C binary tidak ada
+
+GitHub: github.com/USERNAME/rpow2-miner
+"""
+
 import hashlib, struct, time, json, http.client, ssl
 import urllib.request, urllib.parse, threading, logging
 import os, sys, signal, subprocess
@@ -12,8 +26,7 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.j
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         print("❌ config.json tidak ditemukan!")
-        print("   Buat dulu: cp config.example.json config.json")
-        print("   Lalu isi dengan data kamu.")
+        print("   Buat: cp config.example.json config.json")
         sys.exit(1)
     with open(CONFIG_FILE, "r") as f:
         return json.load(f)
@@ -32,8 +45,9 @@ BOT_TOKEN       = CFG["telegram_bot_token"]
 ALLOWED_IDS     = set(str(x) for x in CFG["allowed_chat_ids"])
 SESSIONS        = CFG["sessions"]
 API_BASE        = CFG.get("api_base", "api.rpow2.com")
-CHALLENGE_TO    = CFG.get("challenge_timeout_sec", 300)
+CHALLENGE_TO    = CFG.get("challenge_timeout_sec", 600)
 REPORT_INTERVAL = CFG.get("report_interval_hours", 2) * 3600
+MINING_THREADS  = CFG.get("mining_threads", 1)
 
 # ══════════════════════════════════════════════════════
 #  LOGGING
@@ -121,19 +135,22 @@ def tg_answer_cb(cb_id, text="✅"):
 def main_keyboard():
     return [
         [
-            {"text": "📊 Status",        "callback_data": "cmd_status"},
-            {"text": "💰 Balance",       "callback_data": "cmd_balance"},
+            {"text": "📊 Status",                        "callback_data": "cmd_status"},
+            {"text": "💰 Balance",                       "callback_data": "cmd_balance"},
         ],
         [
-            {"text": "⏸ Pause",         "callback_data": "cmd_stop"},
-            {"text": "▶️ Resume",        "callback_data": "cmd_resume"},
+            {"text": "⏸ Pause",                         "callback_data": "cmd_stop"},
+            {"text": "▶️ Resume",                        "callback_data": "cmd_resume"},
         ],
         [
-            {"text": "🔑 Update Cookie", "callback_data": "cmd_update_cookie"},
+            {"text": f"⚙️ Threads ({MINING_THREADS})",   "callback_data": "cmd_threads"},
         ],
         [
-            {"text": "➕ Tambah Akun",   "callback_data": "cmd_add_account"},
-            {"text": "❓ Help",          "callback_data": "cmd_help"},
+            {"text": "🔑 Update Cookie",                 "callback_data": "cmd_update_cookie"},
+        ],
+        [
+            {"text": "➕ Tambah Akun",                   "callback_data": "cmd_add_account"},
+            {"text": "❓ Help",                          "callback_data": "cmd_help"},
         ]
     ]
 
@@ -157,12 +174,12 @@ def account_select_keyboard(mode="cookie"):
     return rows
 
 # ══════════════════════════════════════════════════════
-#  API CALL — sama persis dengan file asli yang terbukti jalan
+#  API CALL
 # ══════════════════════════════════════════════════════
 def api_call(method, path, session, data=None, retries=5):
     for attempt in range(retries):
         try:
-            conn    = http.client.HTTPSConnection(API_BASE, context=ctx, timeout=30)
+            conn    = http.client.HTTPSConnection(API_BASE, context=ctx, timeout=60)
             headers = {"Cookie": session}
             body    = None
             if method == "POST":
@@ -187,7 +204,7 @@ def api_call(method, path, session, data=None, retries=5):
             return {"error": "EXCEPTION", "message": str(e)}
 
 # ══════════════════════════════════════════════════════
-#  UPDATE SESSION
+#  SESSION MANAGEMENT
 # ══════════════════════════════════════════════════════
 def apply_new_session(chat_id, acc_index, new_cookie, email):
     is_new = False
@@ -219,11 +236,14 @@ def apply_new_session(chat_id, acc_index, new_cookie, email):
     log.info(f"Session Akun #{acc_index+1} diupdate → {email}")
 
     me = api_call("GET", "/me", new_cookie)
+    balance = int(me.get("balance_base_units","0")) // 10_000_000 if "error" not in me else "?"
+    minted  = int(me.get("minted_base_units","0"))  // 10_000_000 if "error" not in me else "?"
+
     tg_send(chat_id,
         f"✅ <b>Cookie Berhasil Diupdate!</b>\n\n"
         f"📧 {email}\n"
-        f"💵 Balance: {me.get('balance_base_units','0')}\n"
-        f"🎫 Minted: {me.get('minted_base_units','0')}\n\n"
+        f"💵 Balance: {balance} RPOW\n"
+        f"🎫 Minted: {minted} RPOW\n\n"
         f"{saved_msg}\n\n"
         f"⛏ Mining otomatis dilanjutkan.",
         main_keyboard()
@@ -235,13 +255,9 @@ def apply_new_session(chat_id, acc_index, new_cookie, email):
         ).start()
         log.info(f"Worker baru untuk Akun #{acc_index+1}")
 
-# ══════════════════════════════════════════════════════
-#  PROSES INPUT USER
-# ══════════════════════════════════════════════════════
 def process_user_input(chat_id, text):
     with user_state_lock:
         state = user_state.get(chat_id)
-
     if not state:
         return False
 
@@ -259,7 +275,7 @@ def process_user_input(chat_id, text):
                 "Harus dimulai:\n"
                 "<code>rpow_session=eyJ...</code>\n\n"
                 "Atau gunakan script:\n"
-                "<code>bash get_cookie.sh TOKEN</code>",
+                "<code>bash ~/rpow2-miner/get_cookie.sh TOKEN</code>",
                 main_keyboard()
             )
             return True
@@ -281,7 +297,7 @@ def process_user_input(chat_id, text):
     return False
 
 # ══════════════════════════════════════════════════════
-#  MINING ENGINE — sama persis dengan file asli
+#  MINING ENGINE — C native dengan Python fallback
 # ══════════════════════════════════════════════════════
 def count_trailing_zero_bits(data: bytes) -> int:
     bits = 0
@@ -298,44 +314,172 @@ def count_trailing_zero_bits(data: bytes) -> int:
 
 def mine(nonce_prefix_hex: str, difficulty_bits: int,
          label: str, timeout: int = None):
+    """
+    Mining engine.
+    Prioritas: C native binary → Python fallback
+    C output JSON:
+      found:    {"type":"found","solution_nonce":N,"hashes":N,"digest":"..."}
+      expired:  {"type":"expired","hashes":N}
+      progress: {"type":"progress","hashes":N,"nonce":N}
+    """
     if timeout is None:
         timeout = CHALLENGE_TO
 
+    if not mining_active.is_set():
+        log.info(f"[{label}] ⏸ Dijeda...")
+        mining_active.wait()
+        log.info(f"[{label}] ▶️ Dilanjutkan!")
+
+    binary = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "rpow-native-miner"
+    )
+
+    if os.path.exists(binary):
+        return _mine_c(nonce_prefix_hex, difficulty_bits, label, timeout, binary)
+    else:
+        log.warning(f"[{label}] rpow-native-miner tidak ada, pakai Python")
+        return _mine_python(nonce_prefix_hex, difficulty_bits, label, timeout)
+
+
+def _mine_c(nonce_prefix_hex, difficulty_bits, label, timeout, binary):
+    """Mining menggunakan native C binary — ~1.5M H/s per worker"""
+    start     = time.time()
+    cutoff_ms = int(timeout * 1000)
+
+    cmd = [
+        binary,
+        "--prefix",      nonce_prefix_hex,
+        "--difficulty",  str(difficulty_bits),
+        "--workers",     str(MINING_THREADS),
+        "--cutoff-ms",   str(cutoff_ms),
+        "--progress-ms", "15000"
+    ]
+
+    log.info(f"[{label}] 🚀 C miner | {MINING_THREADS} workers | diff {difficulty_bits}b | cutoff {timeout}s")
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
+
+        solution_nonce = None
+
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                t    = data.get("type", "")
+
+                if t == "found":
+                    solution_nonce = int(data["solution_nonce"])
+                    hashes  = int(data.get("hashes", 0))
+                    elapsed = time.time() - start
+                    rate    = hashes / elapsed if elapsed > 0 else 0
+                    log.info(
+                        f"[{label}] 🎯 C KETEMU! nonce={solution_nonce} "
+                        f"| {hashes:,} hashes | {elapsed:.1f}s | {rate:,.0f} H/s"
+                    )
+                    break
+
+                elif t == "progress":
+                    hashes  = int(data.get("hashes", 0))
+                    elapsed = time.time() - start
+                    rate    = hashes / elapsed if elapsed > 0 else 0
+                    log.info(f"[{label}] ⛏  {hashes:,} | {rate:,.0f} H/s | {elapsed:.0f}s")
+
+                    if not mining_active.is_set():
+                        proc.terminate()
+                        proc.wait()
+                        log.info(f"[{label}] ⏸ Dijeda...")
+                        mining_active.wait()
+                        log.info(f"[{label}] ▶️ Dilanjutkan, restart C miner...")
+                        start_nonce = data.get("nonce", 0)
+                        new_cmd = cmd + ["--start", str(start_nonce)]
+                        proc = subprocess.Popen(
+                            new_cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            bufsize=1
+                        )
+
+                elif t == "expired":
+                    hashes  = int(data.get("hashes", 0))
+                    elapsed = time.time() - start
+                    log.info(f"[{label}] ⏰ C expired | {hashes:,} hashes | {elapsed:.0f}s")
+                    break
+
+            except (json.JSONDecodeError, KeyError, ValueError):
+                if line:
+                    log.debug(f"[{label}] C: {line}")
+
+        proc.wait()
+        return solution_nonce
+
+    except Exception as e:
+        log.error(f"[{label}] C miner error: {e}, fallback Python")
+        return _mine_python(nonce_prefix_hex, difficulty_bits, label, timeout)
+
+
+def _mine_python(nonce_prefix_hex, difficulty_bits, label, timeout):
+    """Fallback Python miner — ~340k H/s"""
     nonce_prefix = bytes.fromhex(nonce_prefix_hex)
-    buffer       = bytearray(nonce_prefix + b"\x00" * 8)
-    nonce        = 0
-    hashes       = 0
+    num_threads  = MINING_THREADS
+    result_queue = []
+    result_lock  = threading.Lock()
+    stop_event   = threading.Event()
     start        = time.time()
-    last_report  = start
 
-    while True:
-        if not mining_active.is_set():
-            log.info(f"[{label}] ⏸ Dijeda...")
-            mining_active.wait()
-            log.info(f"[{label}] ▶️ Dilanjutkan!")
+    def worker(thread_id, start_nonce, step):
+        buffer      = bytearray(nonce_prefix + b"\x00" * 8)
+        nonce       = start_nonce
+        hashes      = 0
+        last_report = time.time()
 
-        if time.time() - start > timeout:
-            log.info(f"[{label}] ⏰ Timeout, ambil challenge baru")
-            return None
+        while not stop_event.is_set():
+            if time.time() - start > timeout:
+                stop_event.set()
+                return
+            struct.pack_into("<Q", buffer, len(nonce_prefix), nonce)
+            digest = hashlib.sha256(bytes(buffer)).digest()
+            if count_trailing_zero_bits(digest) >= difficulty_bits:
+                with result_lock:
+                    if not result_queue:
+                        result_queue.append(nonce)
+                stop_event.set()
+                return
+            nonce  += step
+            hashes += 1
+            now = time.time()
+            if thread_id == 0 and now - last_report >= 15:
+                elapsed = now - start
+                rate    = (hashes * num_threads) / elapsed if elapsed > 0 else 0
+                log.info(f"[{label}] ⛏ (PY) {hashes*num_threads:,} | {rate:,.0f} H/s | {elapsed:.0f}s")
+                last_report = now
 
-        struct.pack_into("<Q", buffer, len(nonce_prefix), nonce)
-        digest = hashlib.sha256(buffer).digest()
+    workers = []
+    for i in range(num_threads):
+        t = threading.Thread(target=worker, args=(i, i, num_threads), daemon=True)
+        t.start()
+        workers.append(t)
+    for t in workers:
+        t.join()
 
-        if count_trailing_zero_bits(digest) >= difficulty_bits:
-            elapsed = time.time() - start
-            rate    = hashes / elapsed if elapsed > 0 else 0
-            log.info(f"[{label}] 🎯 KETEMU! {hashes:,} | {elapsed:.1f}s | {rate:,.0f} H/s")
-            return nonce
+    if result_queue:
+        nonce   = result_queue[0]
+        elapsed = time.time() - start
+        log.info(f"[{label}] 🎯 (PY) KETEMU! nonce={nonce} | {elapsed:.1f}s")
+        return nonce
 
-        nonce  += 1
-        hashes += 1
-
-        now = time.time()
-        if now - last_report >= 15:
-            elapsed = now - start
-            rate    = hashes / elapsed if elapsed > 0 else 0
-            log.info(f"[{label}] ⛏  {hashes:,} | {rate:,.0f} H/s | {elapsed:.0f}s")
-            last_report = now
+    log.info(f"[{label}] ⏰ (PY) Timeout")
+    return None
 
 # ══════════════════════════════════════════════════════
 #  MINING WORKER
@@ -359,17 +503,16 @@ def mine_worker(acc_index: int):
         log.warning(f"[{label}] Session invalid, menunggu update...")
         tg_notify_all(
             f"⚠️ <b>Session Expired — Akun #{acc_index+1}</b>\n\n"
-            f"Gunakan script helper di Termux:\n"
+            f"Jalankan di Termux:\n"
             f"<code>bash ~/rpow2-miner/get_cookie.sh TOKEN</code>\n\n"
-            f"Atau update manual via 🔑 Update Cookie",
+            f"Atau update via 🔑 Update Cookie",
             main_keyboard()
         )
         old = get_session()
         while True:
             time.sleep(10)
-            # Auto reload config.json
             try:
-                cfg_fresh     = load_config()
+                cfg_fresh      = load_config()
                 fresh_sessions = cfg_fresh.get("sessions", [])
                 if acc_index < len(fresh_sessions):
                     with sessions_lock:
@@ -398,7 +541,9 @@ def mine_worker(acc_index: int):
             "acc_index" : acc_index
         }
 
-    log.info(f"[{label}] ✅ {email} | Balance: {me.get('balance_base_units','0')} | Minted: {me.get('minted_base_units','0')}")
+    balance = int(me.get("balance_base_units","0")) // 10_000_000
+    minted  = int(me.get("minted_base_units","0"))  // 10_000_000
+    log.info(f"[{label}] ✅ {email} | Balance: {balance} RPOW | Minted: {minted} RPOW")
 
     while True:
         try:
@@ -419,7 +564,7 @@ def mine_worker(acc_index: int):
                         tg_notify_all(
                             f"⚠️ <b>Session Expired!</b>\n\n"
                             f"📧 <code>{email}</code>\n\n"
-                            f"Jalankan di Termux:\n"
+                            f"Jalankan:\n"
                             f"<code>bash ~/rpow2-miner/get_cookie.sh TOKEN</code>",
                             main_keyboard()
                         )
@@ -450,14 +595,26 @@ def mine_worker(acc_index: int):
             if solution is None:
                 continue
 
-            result = api_call("POST", "/mint", session,
-                              {"challenge_id": cid, "solution_nonce": str(solution)})
+            # Retry mint sampai 5x
+            result = {"error": "init"}
+            for mint_attempt in range(5):
+                result = api_call("POST", "/mint", session,
+                                  {"challenge_id": cid, "solution_nonce": str(solution)},
+                                  retries=3)
+                if "error" not in result:
+                    break
+                msg = str(result.get("message",""))
+                if "expired" in msg.lower():
+                    break
+                log.warning(f"[{label}] Mint retry {mint_attempt+1}/5: {msg}")
+                time.sleep(3 * (mint_attempt + 1))
 
             if "error" in result:
                 msg = str(result.get("message",""))
                 if "expired" in msg.lower():
+                    log.info(f"[{label}] Challenge expired, ambil baru...")
                     continue
-                log.warning(f"[{label}] Mint error: {msg}")
+                log.warning(f"[{label}] Mint gagal: {msg}")
                 time.sleep(2)
                 continue
 
@@ -494,6 +651,13 @@ def mine_worker(acc_index: int):
 # ══════════════════════════════════════════════════════
 #  STATUS & BALANCE
 # ══════════════════════════════════════════════════════
+def fmt(base_units_str):
+    """Format base_units ke RPOW (1 RPOW = 10,000,000 base_units)"""
+    try:
+        return int(base_units_str) // 10_000_000
+    except:
+        return 0
+
 def build_status():
     with stats_lock:
         uptime = int(time.time() - global_stats["start_time"])
@@ -501,13 +665,18 @@ def build_status():
         m      = rem // 60
         total  = global_stats["total_mined"]
         accs   = dict(global_stats["accounts"])
-    state = "▶️ Running" if mining_active.is_set() else "⏸ Paused"
+    state  = "▶️ Running" if mining_active.is_set() else "⏸ Paused"
+    binary = os.path.exists(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "rpow-native-miner"
+    ))
+    engine = "⚡ C native" if binary else "🐍 Python"
 
     lines = [
         f"📊 <b>RPOW2 Status</b>",
         f"",
         f"{state}  |  Uptime: {h}j {m}m",
         f"🌐 Total: <b>{total} token</b>",
+        f"🔧 Engine: {engine} | Threads: {MINING_THREADS}",
         f""
     ]
     for email, s in accs.items():
@@ -529,15 +698,20 @@ def build_balance():
     for i, session in enumerate(sessions_copy, 1):
         me = api_call("GET", "/me", session)
         if "error" not in me:
+            balance = fmt(me.get("balance_base_units","0"))
+            minted  = fmt(me.get("minted_base_units","0"))
+            daily   = fmt(me.get("daily_minted_base_units","0"))
+            cap     = fmt(me.get("daily_mint_cap_base_units","0"))
             lines.append(
                 f"📧 {me['email']}\n"
-                f"   💵 Balance: <b>{me.get('balance_base_units','0')}</b>  |  "
-                f"🎫 Minted: {me.get('minted_base_units','0')}"
+                f"   💵 Balance: <b>{balance} RPOW</b>\n"
+                f"   🎫 Total Minted: {minted} RPOW\n"
+                f"   📅 Hari ini: {daily}/{cap} RPOW"
             )
         else:
             lines.append(
                 f"Akun #{i}: ❌ Expired\n"
-                f"   Jalankan: <code>bash ~/rpow2-miner/get_cookie.sh TOKEN</code>"
+                f"   <code>bash ~/rpow2-miner/get_cookie.sh TOKEN</code>"
             )
     return "\n\n".join(lines)
 
@@ -545,6 +719,7 @@ def build_balance():
 #  COMMAND HANDLER
 # ══════════════════════════════════════════════════════
 def handle_cmd(chat_id, cmd):
+    global MINING_THREADS
     cmd = cmd.strip().split("@")[0]
 
     if cmd in ("/start", "/menu", "cmd_menu"):
@@ -570,6 +745,58 @@ def handle_cmd(chat_id, cmd):
             user_state.pop(chat_id, None)
         tg_send(chat_id, "❌ Dibatalkan.", main_keyboard())
 
+    elif cmd in ("/threads", "cmd_threads"):
+        binary = os.path.exists(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "rpow-native-miner"
+        ))
+        engine_note = "⚡ C native aktif" if binary else "🐍 Python mode"
+        tg_send(chat_id,
+            f"⚙️ <b>Setting Mining Threads</b>\n\n"
+            f"Saat ini: <b>{MINING_THREADS} thread</b>\n"
+            f"Engine: {engine_note}\n\n"
+            f"Pilih jumlah thread:",
+            [
+                [
+                    {"text": "1️⃣ 1 thread",  "callback_data": "cmd_set_threads_1"},
+                    {"text": "2️⃣ 2 thread",  "callback_data": "cmd_set_threads_2"},
+                ],
+                [
+                    {"text": "4️⃣ 4 thread ⭐","callback_data": "cmd_set_threads_4"},
+                    {"text": "6️⃣ 6 thread",  "callback_data": "cmd_set_threads_6"},
+                ],
+                [
+                    {"text": "8️⃣ 8 thread 🔥","callback_data": "cmd_set_threads_8"},
+                ],
+                [{"text": "❌ Batal", "callback_data": "cmd_cancel"}]
+            ]
+        )
+
+    elif cmd.startswith("cmd_set_threads_"):
+        try:
+            n = int(cmd.replace("cmd_set_threads_", ""))
+            if n not in (1, 2, 4, 6, 8):
+                raise ValueError
+            MINING_THREADS = n
+            cfg_data = load_config()
+            cfg_data["mining_threads"] = n
+            save_config(cfg_data)
+            label_map = {
+                1: "Hemat baterai",
+                2: "2x hashrate",
+                4: "4x hashrate ⭐ Recommended",
+                6: "6x hashrate, agak panas",
+                8: "8x hashrate MAX, sangat panas"
+            }
+            tg_send(chat_id,
+                f"✅ <b>Thread diubah ke {n}</b>\n\n"
+                f"<i>{label_map.get(n,'')}</i>\n\n"
+                f"Aktif untuk challenge berikutnya.",
+                main_keyboard()
+            )
+            log.info(f"Mining threads → {n} via Telegram")
+        except (ValueError, IndexError):
+            tg_send(chat_id, "❌ Tidak valid.", main_keyboard())
+
     elif cmd in ("/updatecookie", "cmd_update_cookie"):
         tg_send(chat_id,
             "🔑 <b>Update Cookie</b>\n\nPilih akun:",
@@ -581,54 +808,50 @@ def handle_cmd(chat_id, cmd):
             user_state[chat_id] = {"mode": "add_account", "acc_index": None}
         tg_send(chat_id,
             "➕ <b>Tambah Akun Baru</b>\n\n"
-            "Cara dapat cookie:\n"
             "1️⃣ Buka rpow2.com/#/login\n"
             "2️⃣ Masukkan email → Send\n"
             "3️⃣ Cek email → long-press link → Copy\n"
-            "4️⃣ Di Termux jalankan:\n"
-            "<code>bash ~/rpow2-miner/get_cookie.sh TOKEN</code>\n"
+            "4️⃣ Di Termux:\n"
+            "<code>bash ~/rpow2-miner/get_cookie.sh URL</code>\n"
             "5️⃣ Paste cookie di sini\n\n"
-            "Atau /cancel untuk batal."
+            "Atau /cancel batal."
         )
 
     elif cmd in ("/help", "cmd_help"):
         tg_send(chat_id,
             "❓ <b>Panduan RPOW2 Bot</b>\n\n"
             "<b>Mining:</b>\n"
-            "📊 Status — statistik real-time\n"
+            "📊 Status — statistik + engine info\n"
             "💰 Balance — cek saldo semua akun\n"
-            "⏸ Pause / ▶️ Resume — kontrol mining\n\n"
-            "<b>Cookie / Login:</b>\n"
+            "⏸ Pause / ▶️ Resume\n"
+            "⚙️ Threads — atur 1/2/4/6/8 thread\n\n"
+            "<b>Cookie:</b>\n"
             "🔑 Update Cookie — update via Telegram\n"
-            "➕ Tambah Akun — daftarkan akun baru\n\n"
-            "<b>⚡ Cara termudah update cookie:</b>\n"
+            "➕ Tambah Akun — akun baru\n\n"
+            "<b>Update Cookie (cara termudah):</b>\n"
             "1. Buka rpow2.com/#/login\n"
             "2. Masukkan email → Send\n"
-            "3. Buka Gmail → long-press link\n"
+            "3. Gmail → long-press link → Copy\n"
             "4. Di Termux:\n"
             "<code>bash ~/rpow2-miner/get_cookie.sh URL</code>",
             main_keyboard()
         )
 
-    elif cmd.startswith("cmd_pick_cookie_") or cmd.startswith("cmd_pick_add_"):
+    elif cmd.startswith("cmd_pick_cookie_"):
         try:
             acc_index = int(cmd.split("_")[-1])
             with user_state_lock:
-                user_state[chat_id] = {
-                    "mode"     : "cookie",
-                    "acc_index": acc_index
-                }
+                user_state[chat_id] = {"mode": "cookie", "acc_index": acc_index}
             tg_send(chat_id,
                 f"🔑 <b>Update Cookie — Akun #{acc_index+1}</b>\n\n"
-                f"Cara paling mudah:\n"
-                f"1️⃣ Buka rpow2.com/#/login\n"
-                f"2️⃣ Masukkan email → Send\n"
-                f"3️⃣ Long-press link di email → Copy\n"
-                f"4️⃣ Di Termux:\n"
-                f"<code>bash ~/rpow2-miner/get_cookie.sh URL</code>\n\n"
-                f"Atau paste cookie langsung di sini:\n"
+                f"Cara termudah:\n"
+                f"1. Buka rpow2.com/#/login\n"
+                f"2. Email → Send\n"
+                f"3. Gmail → long-press link → Copy\n"
+                f"4. <code>bash ~/rpow2-miner/get_cookie.sh URL</code>\n\n"
+                f"Atau paste cookie langsung:\n"
                 f"<code>rpow_session=eyJ...</code>\n\n"
-                f"Atau /cancel untuk batal."
+                f"Atau /cancel batal."
             )
         except (ValueError, IndexError):
             tg_send(chat_id, "❌ Akun tidak valid.", main_keyboard())
@@ -726,31 +949,47 @@ signal.signal(signal.SIGTERM, on_shutdown)
 # ══════════════════════════════════════════════════════
 def main():
     log.info("=" * 54)
-    log.info("  RPOW2 Mining Bot — Termux/Android Edition")
+    log.info("  RPOW2 Mining Bot v3.0 — Termux/Android Edition")
     log.info("=" * 54)
 
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN":
         log.error("❌ Isi telegram_bot_token di config.json!")
         sys.exit(1)
 
+    # Cek curl
     try:
         subprocess.run(["curl", "--version"], capture_output=True, check=True)
         log.info("✅ curl tersedia")
     except (FileNotFoundError, subprocess.CalledProcessError):
-        log.error("❌ Install curl dulu: pkg install curl")
+        log.error("❌ Install curl: pkg install curl")
         sys.exit(1)
 
+    # Cek C binary
+    binary = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rpow-native-miner")
+    if os.path.exists(binary):
+        log.info(f"✅ C miner tersedia — ~1.5M H/s per worker")
+    else:
+        log.warning("⚠️ C miner tidak ada — pakai Python (~340k H/s)")
+        log.warning("   Compile: clang -O3 -o rpow-native-miner rpow-native-miner.c -lpthread")
+
+    log.info(f"  Threads: {MINING_THREADS}")
     log.info(f"  Memeriksa {len(SESSIONS)} session...")
+
     for i, session in enumerate(SESSIONS):
         me = api_call("GET", "/me", session)
         if "error" not in me:
-            log.info(f"  Akun #{i+1}: ✅ {me['email']} | Balance: {me.get('balance_base_units','0')}")
+            balance = fmt(me.get("balance_base_units","0"))
+            log.info(f"  Akun #{i+1}: ✅ {me['email']} | {balance} RPOW")
         else:
             log.warning(f"  Akun #{i+1}: ❌ Expired")
 
+    binary_status = "⚡ C native (~1.5M H/s/worker)" if os.path.exists(binary) else "🐍 Python (~340k H/s)"
+
     tg_notify_all(
-        f"🚀 <b>RPOW2 Bot Started!</b>\n\n"
+        f"🚀 <b>RPOW2 Bot v3.0 Started!</b>\n\n"
         f"⛏ {len(SESSIONS)} akun dimuat\n"
+        f"🔧 Engine: {binary_status}\n"
+        f"🧵 Threads: {MINING_THREADS}\n"
         f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         f"Jika session expired:\n"
         f"<code>bash ~/rpow2-miner/get_cookie.sh TOKEN</code>",
