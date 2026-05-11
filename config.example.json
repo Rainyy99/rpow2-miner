@@ -4,6 +4,7 @@
   "report_interval_hours": 2,
   "challenge_timeout_sec": 300,
   "api_base": "api.rpow2.com",
+  "mining_threads": 1,
   "sessions": [
     "rpow_session=COOKIE_AKUN_1",
     "rpow_session=COOKIE_AKUN_2"
