@@ -2,3 +2,7 @@ config.json
 logs/
 __pycache__/
 *.pyc
+*.log
+rpow-native-miner
+rpow-native-miner-v2
+.env
