@@ -108,16 +108,3 @@ bash get_cookie.sh URL_MAGIC_LINK_BARU
 | ⚙️ Threads | Atur 1/2/4/6/8 thread |
 | 🔑 Update Cookie | Update cookie |
 | ➕ Tambah Akun | Daftarkan akun baru |
-
-## ⚙️ Tips Threads Samsung A15
-
-| Threads | Hashrate | Baterai | Suhu |
-|---------|----------|---------|------|
-| 1 | ~1.5M H/s | Normal | Normal |
-| 2 | ~3M H/s | Sedang | Hangat |
-| 4 | ~5-6M H/s | Tinggi | Panas |
-| 8 | ~8M H/s | Sangat tinggi | Sangat panas |
-
-Recommended: **4 thread** untuk keseimbangan performa & suhu.
-
-## 📁 Struktur File
